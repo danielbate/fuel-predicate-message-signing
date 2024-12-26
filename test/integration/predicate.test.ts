@@ -1,8 +1,9 @@
 
-import { ScriptTransactionRequest, sha256 } from 'fuels';
+import { CoinTransactionRequestInput, ScriptTransactionRequest, sha256, Signer } from 'fuels';
 import { launchTestNode } from 'fuels/test-utils';
 import { TestPredicate as PredicateSigning } from '../../src/sway-api';
 import { describe, it, expect } from 'vitest';
+import { getMaxPredicateGasUsed } from '../../src/utils';
 
 describe('predicate', () => {
   it('sends tx', async () => {
@@ -12,13 +13,13 @@ describe('predicate', () => {
       }
     });
     const { wallets: [
-      sender,
+      admin,
       signer,
       receiver,
     ], provider } = launched;
 
     const initialBalance = await receiver.getBalance();
-    
+    const assetId = '0x0101010101010101010101010101010101010101010101010101010101010101';
     const amountToReceiver = 100;
     
     const predicate = new PredicateSigning({
@@ -26,10 +27,10 @@ describe('predicate', () => {
       data: [signer.address.toB256()],
     });
     
-    const tx = await sender.transfer(
+    const tx = await admin.transfer(
       predicate.address,
       200_000,
-      provider.getBaseAssetId()
+      assetId
     );
     await tx.waitForResult();
     
@@ -37,16 +38,14 @@ describe('predicate', () => {
     request.addCoinOutput(
       receiver.address,
       amountToReceiver,
-      provider.getBaseAssetId()
+      assetId
     );
-    
     const resources = await predicate.getResourcesToSpend([
       {
-        assetId: provider.getBaseAssetId(),
+        assetId,
         amount: amountToReceiver,
       },
     ]);
-    
     request.addResources(resources);
     request.addWitness('0x');
 
@@ -55,8 +54,9 @@ describe('predicate', () => {
     const message = `A Fuel Transaction - ${txId}`;
     const messageSignature = await signer.signMessage(message);
     const messageHash = sha256(Buffer.from(message));
-    
-    const txCost = await predicate.getTransactionCost(request, {
+    expect(Signer.recoverAddress(messageHash, messageSignature).toB256()).toBe(signer.address.toB256());
+
+    const txCost = await signer.getTransactionCost(request, {
       signatureCallback: async (txRequest) => {
         txRequest.addWitness(messageSignature);
         txRequest.addWitness(messageHash);
@@ -65,20 +65,21 @@ describe('predicate', () => {
     });
 
     request.updatePredicateGasUsed(txCost.estimatedPredicates);
-
     request.gasLimit = txCost.gasUsed;
     request.maxFee = txCost.maxFee;
 
-    await predicate.fund(request, txCost);
+    await signer.fund(request, txCost);
 
     request.addWitness(messageSignature);
     request.addWitness(messageHash);
-    
-    const res = await provider.sendTransaction(request);
+
+    const maxGasUsed = await getMaxPredicateGasUsed(provider);
+    (request.inputs[0] as CoinTransactionRequestInput).predicateGasUsed = maxGasUsed;
+
+    const res = await signer.sendTransaction(request, { estimateTxDependencies: false });
     await res.waitForResult();
 
-    const finalBalance = await receiver.getBalance();
-
+    const finalBalance = await receiver.getBalance(assetId);
     expect(finalBalance.toNumber()).toBe(initialBalance.toNumber() + amountToReceiver);
   });
 });
